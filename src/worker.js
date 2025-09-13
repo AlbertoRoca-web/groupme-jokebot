@@ -1,4 +1,5 @@
-// src/worker.js — minimal GroupMe joke bot (no scheduler)
+// src/worker.js — minimal GroupMe joke bot (request-only, no cron)
+// Replies to: "joke please", "tell me a joke", "joke about <term>"
 
 export default {
   async fetch(req, env, ctx) {
@@ -17,23 +18,32 @@ export default {
       return new Response("sent");
     }
 
-    // (Optional) reachability check for your browser
-    if (req.method === "GET" && url.pathname === "/webhook") {
-      return new Response("ok");
-    }
-
     // Real GroupMe webhook
-    if (req.method === "POST" && url.pathname === "/webhook") {
-      const body = await safeJson(req);
+    if (url.pathname === "/webhook" && req.method === "POST") {
+      // Log raw body so you can see activity in Workers -> Logs (Invocations)
+      const raw = await req.text().catch(() => "");
+      console.log("WEBHOOK RAW:", raw);
 
-      // Ignore bot/system messages so we don't loop
-      if (body?.sender_type !== "user") return new Response("ok");
+      // Parse JSON if possible
+      let body = {};
+      try { body = JSON.parse(raw || "{}"); } catch {}
+
+      // Avoid loops: ignore messages sent by bots/system/calendar
+      if (body?.sender_type && body.sender_type !== "user") {
+        console.log("IGNORED (sender_type !== user):", body?.sender_type);
+        return new Response("ok");
+      }
 
       const reply = await buildReply(body);
       if (reply) {
-        // reply asynchronously so we ack the webhook immediately
+        // Reply asynchronously so we ack the webhook immediately
         ctx.waitUntil(postToGroupMe(env.BOT_ID, reply));
       }
+      return new Response("ok");
+    }
+
+    // Optional reachability ping
+    if (url.pathname === "/webhook" && req.method === "GET") {
       return new Response("ok");
     }
 
@@ -50,11 +60,9 @@ async function buildReply(body) {
 
   let joke = null;
 
-  // “joke please”, “tell me a joke”, or messages starting with “joke”
   if (/\bjoke please\b/.test(lower) || /\btell me a joke\b/.test(lower) || /^joke\b/.test(lower)) {
     joke = await getRandomJoke();
   } else {
-    // “joke about X” / “do you have a joke about X”
     const m = lower.match(/(?:joke(?:\s+please)?\s+about|do you have a joke about)\s+(.+)/);
     if (m) {
       const term = m[1].replace(/[?.!]+$/, "").slice(0, 80);
@@ -83,6 +91,7 @@ async function postToGroupMe(botId, text, attachments) {
 function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
 
 async function getRandomJoke() {
+  // icanhazdadjoke requires Accept: application/json (no auth required)
   const r = await fetch("https://icanhazdadjoke.com/", {
     headers: { Accept: "application/json", "User-Agent": "groupme-jokebot (workers.dev)" }
   });
@@ -98,8 +107,4 @@ async function searchJoke(term) {
   const d = await r.json().catch(() => ({}));
   if (Array.isArray(d.results) && d.results.length) return pick(d.results).joke;
   return `I don’t have one about “${term}”… but here’s one: ${await getRandomJoke()}`;
-}
-
-async function safeJson(req) {
-  try { return await req.json(); } catch { return {}; }
 }
