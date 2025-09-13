@@ -1,0 +1,21 @@
+name: groupme-jokebot (polling, request-only)
+
+on:
+  schedule:
+    - cron: "* * * * *"    # every minute (UTC)
+  workflow_dispatch:       # manual run button in Actions
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Run poller
+        env:
+          GROUPME_TOKEN: ${{ secrets.GROUPME_TOKEN }}
+          GROUP_ID: ${{ secrets.GROUP_ID }}
+          BOT_ID: ${{ secrets.BOT_ID }}
+        run: node src/poller.js
