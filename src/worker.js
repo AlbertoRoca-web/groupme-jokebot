@@ -8,18 +8,40 @@ export default {
       return new Response("jokebot alive");
     }
 
-    // Manual test: proves BOT_ID can post
-    // Visit: /test?msg=Hello
+    // Manual post test (proves BOT_ID -> GroupMe works)
     if (req.method === "GET" && url.pathname === "/test") {
       const msg = url.searchParams.get("msg") || "Test OK";
       ctx.waitUntil(postToGroupMe(env.BOT_ID, msg));
       return new Response("sent");
     }
 
-    // Reachability check so you can hit it in a browser
+    // Reachability check (shows up in Logs even from a browser)
     if (req.method === "GET" && url.pathname === "/webhook") {
       console.log("GET /webhook (reachability check)");
       return new Response("ok");
+    }
+
+    // NEW: loopback test — Worker simulates GroupMe calling your webhook
+    // Visit /selftest?term=coffee to force a "joke about coffee"
+    if (req.method === "GET" && url.pathname === "/selftest") {
+      const term = url.searchParams.get("term") || "";
+      const payload = {
+        sender_type: "user",
+        name: "Loopback",
+        text: term ? `joke about ${term}` : "joke please",
+        _loopback: true
+      };
+      const selfWebhook = new URL("/webhook", url.origin).toString();
+      console.log("SELFTEST -> POST", selfWebhook, payload);
+
+      // Fire the webhook to ourselves (simulating GroupMe server)
+      await fetch(selfWebhook, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+
+      return new Response("selftest sent");
     }
 
     // Real GroupMe webhook
@@ -31,7 +53,17 @@ export default {
       if (body?.sender_type !== "user") return new Response("ok");
 
       const reply = await buildReply(body);
-      if (reply) ctx.waitUntil(postToGroupMe(env.BOT_ID, reply));
+      if (reply) {
+        // If this came from /selftest, don't recurse again
+        if (body?._loopback) {
+          console.log("loopback reply", reply);
+          await postToGroupMe(env.BOT_ID, reply);
+        } else {
+          // Normal path: reply async
+          const p = postToGroupMe(env.BOT_ID, reply);
+          ctx.waitUntil(p);
+        }
+      }
       return new Response("ok");
     }
 
@@ -56,7 +88,6 @@ async function buildReply(body) {
   if (/\btell me a joke\b/.test(lower) || /\bjoke please\b/.test(lower) || /^joke\b/.test(lower)) {
     joke = await getRandomJoke();
   } else {
-    // "joke about X" / "do you have a joke about X"
     const m = lower.match(/(?:joke(?:\s+please)?\s+about|do you have a joke about)\s+(.+)/);
     if (m) {
       const term = m[1].replace(/[?.!]+$/, "").slice(0, 80);
