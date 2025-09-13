@@ -1,5 +1,7 @@
-// src/worker.js — minimal GroupMe joke bot (request-only, no cron)
-// Replies to: "joke please", "tell me a joke", "joke about <term>"
+// Minimal GroupMe joke bot (request-only; no cron)
+// Replies to: "joke please", "tell me a joke", or "joke about <term>"
+
+let RECENT = []; // tiny in-memory ring buffer for quick debugging
 
 export default {
   async fetch(req, env, ctx) {
@@ -10,7 +12,7 @@ export default {
       return new Response("jokebot alive");
     }
 
-    // Manual post test (proves BOT_ID -> GroupMe works)
+    // Manual "send a message" test (proves BOT_ID -> GroupMe path)
     // Visit: /test?msg=Hello
     if (req.method === "GET" && url.pathname === "/test") {
       const msg = url.searchParams.get("msg") || "Test OK";
@@ -18,32 +20,36 @@ export default {
       return new Response("sent");
     }
 
+    // View the last few webhook events Cloudflare received (for debugging)
+    if (req.method === "GET" && url.pathname === "/recent") {
+      return json(RECENT.slice(-10));
+    }
+
     // Real GroupMe webhook
-    if (url.pathname === "/webhook" && req.method === "POST") {
-      // Log raw body so you can see activity in Workers -> Logs (Invocations)
+    if (req.method === "POST" && url.pathname === "/webhook") {
+      // Read raw once; parse flexibly (JSON OR form-encoded), then log a compact record
       const raw = await req.text().catch(() => "");
-      console.log("WEBHOOK RAW:", raw);
+      const body = parseBodyFromRaw(raw, req.headers.get("content-type"));
 
-      // Parse JSON if possible
-      let body = {};
-      try { body = JSON.parse(raw || "{}"); } catch {}
+      RECENT.push({
+        t: new Date().toISOString(),
+        st: body?.sender_type,
+        name: body?.name,
+        text: body?.text
+      });
+      if (RECENT.length > 50) RECENT = RECENT.slice(-50);
 
-      // Avoid loops: ignore messages sent by bots/system/calendar
+      // Ignore bot/system/calendar so we don't loop
       if (body?.sender_type && body.sender_type !== "user") {
-        console.log("IGNORED (sender_type !== user):", body?.sender_type);
+        console.log("IGNORED sender_type:", body.sender_type);
         return new Response("ok");
       }
 
       const reply = await buildReply(body);
       if (reply) {
-        // Reply asynchronously so we ack the webhook immediately
+        // Ack immediately; post back asynchronously
         ctx.waitUntil(postToGroupMe(env.BOT_ID, reply));
       }
-      return new Response("ok");
-    }
-
-    // Optional reachability ping
-    if (url.pathname === "/webhook" && req.method === "GET") {
       return new Response("ok");
     }
 
@@ -52,6 +58,26 @@ export default {
 };
 
 // ---------- helpers ----------
+
+function json(obj, status = 200) {
+  return new Response(JSON.stringify(obj, null, 2), {
+    status,
+    headers: { "content-type": "application/json" }
+  });
+}
+
+function parseBodyFromRaw(raw, ct = "") {
+  try {
+    if ((ct || "").includes("application/json")) return JSON.parse(raw || "{}");
+    if ((ct || "").includes("application/x-www-form-urlencoded")) {
+      return Object.fromEntries(new URLSearchParams(raw || ""));
+    }
+    // Fallback: try JSON anyway
+    return JSON.parse(raw || "{}");
+  } catch {
+    return {};
+  }
+}
 
 async function buildReply(body) {
   const name = (body?.name || "there").trim();
@@ -91,7 +117,7 @@ async function postToGroupMe(botId, text, attachments) {
 function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
 
 async function getRandomJoke() {
-  // icanhazdadjoke requires Accept: application/json (no auth required)
+  // icanhazdadjoke: no auth; must send Accept: application/json
   const r = await fetch("https://icanhazdadjoke.com/", {
     headers: { Accept: "application/json", "User-Agent": "groupme-jokebot (workers.dev)" }
   });
